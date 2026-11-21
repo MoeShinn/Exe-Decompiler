@@ -205,6 +205,7 @@ jobs:
     needs: finalize
     if: needs.finalize.outputs.changed == 'true'
     permissions:
+      actions: read
       contents: read
       pages: write
       id-token: write
