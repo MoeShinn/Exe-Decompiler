@@ -1,0 +1,211 @@
+name: Dịch ngược
+run-name: Dịch ngược file .exe mới
+
+on:
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "SHA256 (từ 8 ký tự đầu) hoặc tên file cần ép dịch lại. Để trống = chỉ xử lý file mới"
+        required: false
+        default: ""
+
+concurrency:
+  group: decompile
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+  GHIDRA_VERSION: "11.2.1"
+  GHIDRA_URL: https://github.com/NationalSecurityAgency/ghidra/releases/download/Ghidra_11.2.1_build/ghidra_11.2.1_PUBLIC_20241105.zip
+  ILSPY_VERSION: "8.2.0.7535"
+  CFR_VERSION: "0.152"
+  CFR_URL: https://github.com/leibnitz27/cfr/releases/download/0.152/cfr-0.152.jar
+  DIE_URL: https://github.com/horsicq/DIE-engine/releases/download/3.10/die_3.10_Ubuntu_24.04_amd64.deb
+
+jobs:
+  scan:
+    name: Quét file mới
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    outputs:
+      matrix: ${{ steps.scan.outputs.matrix }}
+      has_new: ${{ steps.scan.outputs.has_new }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: scan
+        run: python3 scripts/scan.py
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FORCE: ${{ inputs.force }}
+
+  analyze:
+    name: ${{ matrix.name }}
+    needs: scan
+    if: needs.scan.outputs.has_new == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 340
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.scan.outputs.matrix) }}
+    env:
+      GH_TOKEN: ${{ github.token }}
+      ASSET_NAME: ${{ matrix.name }}
+      ASSET_ID: ${{ matrix.id }}
+      ASSET_SIZE: ${{ matrix.size }}
+      ASSET_SHA256: ${{ matrix.sha256 }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Chuẩn bị môi trường
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Cài thư viện Python
+        run: pip install pefile
+
+      - name: Cài Detect It Easy (không bắt buộc)
+        continue-on-error: true
+        run: |
+          set +e
+          curl -fsSL -o die.deb "$DIE_URL" && sudo apt-get install -y -qq ./die.deb >/dev/null \
+            || echo "::warning::Không cài được diec, dùng nhận diện nội bộ"
+
+      - name: Tải file và tính hash
+        run: python scripts/fetch.py
+
+      - name: Nhận diện loại file và protector
+        id: detect
+        run: python scripts/detect.py
+
+      - name: Cài .NET và ILSpy
+        if: steps.detect.outputs.type == 'dotnet'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+      - name: Cài ilspycmd
+        if: steps.detect.outputs.type == 'dotnet'
+        run: |
+          dotnet tool install -g ilspycmd --version "$ILSPY_VERSION"
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+      - name: Cài de4dot (không bắt buộc)
+        if: steps.detect.outputs.type == 'dotnet'
+        continue-on-error: true
+        run: |
+          set +e
+          mkdir -p /opt/de4dot dl
+          gh release download -R ViRb3/de4dot-cex -p '*net8*' -D dl
+          for f in dl/*; do
+            case "$f" in
+              *.zip) unzip -q -o "$f" -d /opt/de4dot ;;
+              *.7z) 7z x -y -o/opt/de4dot "$f" >/dev/null ;;
+            esac
+          done
+          BIN=$(find /opt/de4dot -type f \( -name 'de4dot.dll' -o -name 'de4dot' \) | head -1)
+          if [ -n "$BIN" ]; then chmod +x "$BIN"; echo "DE4DOT=$BIN" >> "$GITHUB_ENV"
+          else echo "::warning::Không cài được de4dot, bỏ qua bước gỡ obfuscator"; fi
+
+      - name: Cài UPX
+        if: steps.detect.outputs.upx == 'true'
+        run: sudo apt-get install -y -qq upx-ucl
+
+      - name: Gỡ bảo vệ bằng phân tích tĩnh
+        id: unpack
+        run: python scripts/unpack.py
+
+      - name: Cài Java
+        if: steps.unpack.outputs.tool == 'java' || steps.unpack.outputs.tool == 'native'
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+      - name: Cài CFR
+        if: steps.unpack.outputs.tool == 'java'
+        run: |
+          curl -fsSL -o cfr.jar "$CFR_URL"
+          echo "CFR_JAR=$PWD/cfr.jar" >> "$GITHUB_ENV"
+      - name: Cài Ghidra
+        if: steps.unpack.outputs.tool == 'native'
+        run: |
+          curl -fsSL -o ghidra.zip "$GHIDRA_URL"
+          sudo unzip -q ghidra.zip -d /opt
+          echo "GHIDRA_HOME=$(echo /opt/ghidra_*)" >> "$GITHUB_ENV"
+      - name: Cài pyinstxtractor-ng và pycdc
+        if: steps.unpack.outputs.tool == 'pyinstaller'
+        run: |
+          pip install pyinstxtractor-ng
+          git clone --depth 1 https://github.com/zrax/pycdc.git /tmp/pycdc
+          cd /tmp/pycdc && cmake . -DCMAKE_BUILD_TYPE=Release >/dev/null && make -j"$(nproc)" >/dev/null
+          echo "PYCDC=/tmp/pycdc/pycdc" >> "$GITHUB_ENV"
+
+      - name: Dịch ngược
+        run: python scripts/decompile.py
+
+      - name: Sinh file thông tin report.md
+        if: always()
+        run: python scripts/report.py report
+      - name: Đóng gói zip và tải lên release
+        if: always()
+        run: python scripts/report.py package
+      - name: Lưu kết quả cho bước tổng hợp
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: result-${{ matrix.sha256 }}
+          path: work/result-*.json
+          if-no-files-found: ignore
+          retention-days: 3
+
+  finalize:
+    name: Cập nhật index.json
+    needs: [scan, analyze]
+    if: ${{ always() && needs.scan.result == 'success' && needs.scan.outputs.has_new == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    outputs:
+      changed: ${{ steps.commit.outputs.changed }}
+    env:
+      BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: result-*
+          merge-multiple: true
+          path: artifacts
+      - run: python3 scripts/merge_index.py
+      - id: commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/index.json
+          if git diff --cached --quiet; then echo "changed=false" >> "$GITHUB_OUTPUT"; exit 0; fi
+          git commit -m "chore: cập nhật index.json"
+          ok=0
+          for i in 1 2 3; do
+            if git pull --rebase origin "$BRANCH" && git push origin "HEAD:$BRANCH"; then ok=1; break; fi
+            sleep 3
+          done
+          [ "$ok" = 1 ] || { echo "::error::Không push được index.json"; exit 1; }
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+  deploy:
+    name: Deploy trang web
+    needs: finalize
+    if: needs.finalize.outputs.changed == 'true'
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/pages.yml
