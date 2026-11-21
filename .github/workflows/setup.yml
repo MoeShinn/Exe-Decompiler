@@ -1,0 +1,30 @@
+name: Cài đặt release
+run-name: Tạo release exe-input và decompiled
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  setup:
+    name: Tạo 2 release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    env:
+      GH_TOKEN: ${{ github.token }}
+      BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      - name: Tạo release nếu chưa có
+        run: |
+          create() {
+            if gh release view "$1" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+              echo "Release '$1' đã có, giữ nguyên."
+            else
+              gh release create "$1" -R "$GITHUB_REPOSITORY" --target "$BRANCH" --title "$2" --notes "$3"
+              echo "Đã tạo release '$1'."
+            fi
+          }
+          create exe-input "File .exe đầu vào" "Tải các file .exe cần dịch ngược vào release này (mục Edit → kéo thả file), rồi chạy workflow 'Dịch ngược'."
+          create decompiled "Kết quả dịch ngược" "Các file zip mã nguồn dịch ngược do workflow tạo ra. Không tải file thủ công vào đây."
