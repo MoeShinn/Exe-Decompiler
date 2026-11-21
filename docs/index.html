@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="vi">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mã nguồn đã dịch ngược</title>
+<style>
+:root{--bg:#f4f6f8;--panel:#fff;--fg:#17202a;--muted:#5d6b7a;--line:#dde3ea;--accent:#1f4fbf;--accent-fg:#fff;--ok:#0f5e2b;--ok-bg:#d9f3e2;--warn:#7a4e00;--warn-bg:#fbefc9;--err:#9b1c24;--err-bg:#fbe0e1;color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0e1319;--panel:#161d26;--fg:#e8edf3;--muted:#93a1b1;--line:#263140;--accent:#7fa6ff;--accent-fg:#0b1220;--ok:#8be8ab;--ok-bg:#123222;--warn:#f1c970;--warn-bg:#3a2e0e;--err:#ff9ea3;--err-bg:#40181b;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.5 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:56rem;margin:0 auto;padding:2rem 1rem 4rem}
+h1{font-size:1.6rem;margin:0 0 .25rem;letter-spacing:-.01em}
+.sub{color:var(--muted);margin:0 0 1.5rem}
+.live{display:none;align-items:center;gap:.6rem;padding:.7rem 1rem;margin-bottom:1rem;border-radius:.5rem;background:var(--warn-bg);color:var(--warn)}
+.live.on{display:flex}
+.live a{color:inherit;font-weight:600}
+.dot{width:.6rem;height:.6rem;border-radius:50%;background:currentColor;animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.25}}
+@media (prefers-reduced-motion:reduce){.dot{animation:none}}
+.bar{display:flex;gap:.5rem;margin-bottom:1rem}
+input[type=search]{flex:1;min-width:0;padding:.6rem .8rem;border:1px solid var(--line);border-radius:.5rem;background:var(--panel);color:var(--fg);font:inherit}
+button,.btn{font:inherit;cursor:pointer;border:1px solid var(--line);background:var(--panel);color:var(--fg);padding:.55rem .9rem;border-radius:.5rem;text-decoration:none;display:inline-block}
+.btn.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+ul{list-style:none;margin:0;padding:0;border:1px solid var(--line);border-radius:.6rem;background:var(--panel);overflow:hidden}
+li{display:flex;flex-wrap:wrap;gap:.75rem 1rem;align-items:center;justify-content:space-between;padding:.9rem 1rem}
+li+li{border-top:1px solid var(--line)}
+.info{min-width:0;flex:1 1 18rem}
+.name{font-weight:600;overflow-wrap:anywhere}
+.meta{display:flex;flex-wrap:wrap;gap:.2rem 1rem;color:var(--muted);font-size:.875rem;margin-top:.15rem}
+.hash{all:unset;cursor:pointer;font:.8125rem ui-monospace,Consolas,monospace;color:var(--muted);text-decoration:underline dotted}
+.hash:focus-visible{outline:3px solid var(--accent);outline-offset:2px}
+.act{display:flex;align-items:center;gap:.7rem}
+.tag{padding:.1rem .6rem;border-radius:99px;font-size:.8125rem;font-weight:600;white-space:nowrap}
+.tag.ok{background:var(--ok-bg);color:var(--ok)}.tag.warn{background:var(--warn-bg);color:var(--warn)}.tag.err{background:var(--err-bg);color:var(--err)}
+.msg{padding:2rem 1rem;text-align:center;color:var(--muted)}
+</style>
+</head>
+<body>
+<main>
+  <h1>Mã nguồn đã dịch ngược</h1>
+  <p class="sub" id="updated">Đang tải danh sách…</p>
+  <div class="live" id="live" role="status" aria-live="polite"><span class="dot"></span><span>Đang dịch ngược…</span><a id="liveLink" href="#" rel="noopener">Xem tiến trình</a></div>
+  <div class="bar">
+    <input type="search" id="q" placeholder="Tìm theo tên hoặc hash" aria-label="Tìm theo tên hoặc hash">
+    <button id="sort" type="button"></button>
+  </div>
+  <ul id="list"></ul>
+</main>
+<script>
+const $ = s => document.querySelector(s);
+const STATUS = {done: ["Đầy đủ", "ok"], report_only: ["Chỉ có report", "warn"], error: ["Lỗi", "err"]};
+const ACTIVE = ["queued", "in_progress", "waiting", "pending", "requested"];
+let items = [], newestFirst = true, loadError = false;
+
+function detectRepo() {
+  const p = new URLSearchParams(location.search).get("repo");
+  if (p && /^[\w.-]+\/[\w.-]+$/.test(p)) return p;
+  if (!location.hostname.endsWith(".github.io")) return null;
+  const owner = location.hostname.split(".")[0];
+  const seg = location.pathname.split("/").filter(Boolean)[0];
+  return seg && !seg.endsWith(".html") ? `${owner}/${seg}` : `${owner}/${location.hostname}`;
+}
+const repo = detectRepo();
+
+function fmtSize(n) {
+  const u = ["B", "KB", "MB", "GB"]; let i = 0;
+  while (n >= 1024 && i < 3) { n /= 1024; i++; }
+  return (i ? n.toFixed(1) : n) + " " + u[i];
+}
+function el(tag, cls, text) {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (text !== undefined) e.textContent = text;
+  return e;
+}
+
+function row(it) {
+  const li = el("li"), info = el("div", "info"), meta = el("div", "meta"), act = el("div", "act");
+  info.append(el("div", "name", it.name));
+  const date = it.processed_at ? new Date(it.processed_at).toLocaleString("vi-VN") : "";
+  const prot = it.protector && it.protector !== "none" ? "Protector: " + it.protector : "Không protect";
+  [date, it.type, prot, fmtSize(it.size || 0)].forEach(t => t && meta.append(el("span", "", t)));
+  const h = el("button", "hash", it.sha256.slice(0, 12));
+  h.type = "button"; h.title = "Bấm để chép SHA256";
+  h.onclick = async () => {
+    try { await navigator.clipboard.writeText(it.sha256); h.textContent = "Đã chép"; } catch { h.textContent = "Không chép được"; }
+    setTimeout(() => h.textContent = it.sha256.slice(0, 12), 1500);
+  };
+  meta.append(h);
+  if (it.note) meta.append(el("span", "", it.note));
+  info.append(meta);
+  const [label, kind] = STATUS[it.status] || [it.status, "err"];
+  act.append(el("span", "tag " + kind, label));
+  if (it.zip_url && it.zip_url.startsWith("https://github.com/")) {
+    const a = el("a", "btn primary", "Tải zip");
+    a.href = it.zip_url; a.rel = "noopener"; act.append(a);
+  }
+  li.append(info, act);
+  return li;
+}
+
+function render() {
+  const q = $("#q").value.trim().toLowerCase();
+  const shown = items
+    .filter(i => !q || i.name.toLowerCase().includes(q) || i.sha256.includes(q))
+    .sort((a, b) => (a.processed_at || "").localeCompare(b.processed_at || "") * (newestFirst ? -1 : 1));
+  const list = $("#list");
+  list.replaceChildren(...shown.map(row));
+  if (!shown.length) {
+    const li = el("li", "msg", loadError ? "Không tải được index.json. Thử tải lại trang sau ít phút."
+      : items.length ? "Không có kết quả khớp với từ khóa." : "Chưa có file nào được dịch ngược. Tải .exe lên release exe-input rồi chạy workflow.");
+    list.replaceChildren(li);
+  }
+  $("#sort").textContent = newestFirst ? "Mới nhất trước" : "Cũ nhất trước";
+}
+
+async function loadIndex() {
+  try {
+    const r = await fetch("index.json?t=" + Date.now(), {cache: "no-store"});
+    if (!r.ok) throw new Error(r.status);
+    const d = await r.json();
+    items = d.items || []; loadError = false;
+    $("#updated").textContent = d.updated ? "Cập nhật lúc " + new Date(d.updated).toLocaleString("vi-VN") : "Chưa có dữ liệu.";
+  } catch {
+    loadError = true; $("#updated").textContent = "Lỗi tải dữ liệu.";
+  }
+  render();
+}
+
+let delay = 60000, wasActive = false;
+async function poll() {
+  try {
+    const r = await fetch(`https://api.github.com/repos/${repo}/actions/workflows/decompile.yml/runs?per_page=1`,
+      {headers: {Accept: "application/vnd.github+json"}});
+    if (r.status === 403 || r.status === 429) delay = Math.min(delay * 2, 600000);
+    else if (r.ok) {
+      delay = 60000;
+      const run = (await r.json()).workflow_runs?.[0];
+      const active = !!run && ACTIVE.includes(run.status);
+      $("#live").classList.toggle("on", active);
+      if (active) $("#liveLink").href = run.html_url;
+      if (wasActive && !active) { setTimeout(loadIndex, 25000); setTimeout(loadIndex, 70000); }
+      wasActive = active;
+    }
+  } catch {}
+  setTimeout(poll, delay);
+}
+
+$("#q").addEventListener("input", render);
+$("#sort").addEventListener("click", () => { newestFirst = !newestFirst; render(); });
+loadIndex();
+if (repo) poll();
+</script>
+</body>
+</html>
