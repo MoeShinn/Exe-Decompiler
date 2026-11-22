@@ -42,7 +42,7 @@ def main():
             sha = digest[7:]
         else:
             tmp = Path(tempfile.mkdtemp()) / "f"
-            download_asset(a["id"], tmp)
+            download_asset(name, tmp)
             sha = hash_file(tmp)["sha256"]
             tmp.unlink()
         if sha in seen:

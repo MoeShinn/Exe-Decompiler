@@ -2,6 +2,8 @@
 import hashlib
 import json
 import os
+import re
+import shutil
 import subprocess
 import traceback
 from pathlib import Path
@@ -44,12 +46,19 @@ def hash_file(path):
     return {k: h.hexdigest() for k, h in algos.items()}
 
 
-def download_asset(asset_id, dest):
+def download_asset(name, dest, tag="exe-input"):
+    """Tải asset theo tên bằng gh release download (tự xử lý chuyển hướng)."""
     dest = Path(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    with open(dest, "wb") as f:
-        run(["gh", "api", "-H", "Accept: application/octet-stream",
-             f"repos/{REPO}/releases/assets/{asset_id}"], stdout=f)
+    tmp = dest.parent / "_dl"
+    shutil.rmtree(tmp, ignore_errors=True)
+    tmp.mkdir(parents=True, exist_ok=True)
+    pattern = re.sub(r"([\\*?\[])", r"\\\1", name)  # thoát ký tự glob
+    run(["gh", "release", "download", tag, "-R", REPO, "-p", pattern, "-D", tmp, "--clobber"], timeout=3600)
+    files = [p for p in tmp.iterdir() if p.is_file()]
+    if len(files) != 1:
+        raise RuntimeError(f"Mong đợi 1 file khi tải '{name}', nhận được {len(files)}")
+    files[0].replace(dest)
+    shutil.rmtree(tmp, ignore_errors=True)
 
 
 def load_state():
